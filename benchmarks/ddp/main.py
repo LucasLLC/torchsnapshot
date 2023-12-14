@@ -31,7 +31,10 @@ def rank_0_print(msg: str) -> None:
     if dist.get_rank() == 0:
         print(msg)
 
-
+import torch.distributed.checkpoint as DCP
+from torch.distributed.checkpoint.state_dict import (
+    _patch_model_state_dict,
+)
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--work-dir", default="/tmp")
@@ -68,3 +71,15 @@ if __name__ == "__main__":
     )
     rank_0_print(f"Snapshot path: {snapshot.path}")
     rank_0_print(f"Took {time.time() - t_begin} seconds with torchsnapshot")
+
+    rank_0_print("Saving the model with DCP...")
+    checkpointer = DCP.FileSystemCheckpointer("{args.work_dir}/{uuid.uuid4()}")
+    _patch_model_state_dict(model)
+
+    begin_ts = time.monotonic()
+    checkpointer.save(state_dict={"model": model})
+
+    dist.barrier()
+    end_ts = time.monotonic()
+
+    rank_0_print(f"Took {time.time() - t_begin} seconds with DCP")
