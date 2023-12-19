@@ -31,10 +31,13 @@ def rank_0_print(msg: str) -> None:
     if dist.get_rank() == 0:
         print(msg)
 
-
+import torch.distributed.checkpoint as DCP
+from torch.distributed.checkpoint.state_dict import (
+    _patch_model_state_dict,
+)
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--work-dir", default="/tmp")
+    parser.add_argument("--work-dir", default="tmp")
     parser.add_argument("--param-size", type=int, default=int(100_000_000))
     parser.add_argument("--num-params", type=int, default=200)
     args = parser.parse_args()
@@ -50,21 +53,37 @@ if __name__ == "__main__":
     sz = sum(t.nelement() * t.element_size() for t in model.parameters())
     rank_0_print(f"Model size: {sz / 1_000_000_000.0} GB")
 
-    if dist.get_rank() == 0:
-        print("Saving the model with torch.save...")
-        t_begin = time.time()
-        with open(f"{args.work_dir}/{uuid.uuid4()}.pt", "wb+") as f:
-            torch.save(model.state_dict(), f)
-        print(f"Took {time.time() - t_begin} seconds with torch.save")
-    dist.barrier()
+    # rank_0_print("Saving the model with torchsnapshot...")
+    # t_begin = time.monotonic()
+    # app_state = {"model": model}
+    # snapshot = torchsnapshot.Snapshot.take(
+    #     path=f"{args.work_dir}/{uuid.uuid4()}",
+    #     app_state=app_state,
+    #     replicated=["**"],
+    # )
+    # os.sync()
+    # rank_0_print(f"Snapshot path: {snapshot.path}")
+    # rank_0_print(f"Took {time.monotonic() - t_begin} seconds with torchsnapshot")
+    # dist.barrier()
 
-    rank_0_print("Saving the model with torchsnapshot...")
-    t_begin = time.time()
-    app_state = {"model": model}
-    snapshot = torchsnapshot.Snapshot.take(
-        path=f"{args.work_dir}/{uuid.uuid4()}",
-        app_state=app_state,
-        replicated=["**"],
-    )
-    rank_0_print(f"Snapshot path: {snapshot.path}")
-    rank_0_print(f"Took {time.time() - t_begin} seconds with torchsnapshot")
+    _patch_model_state_dict(model)
+    rank_0_print("Saving the model with DCP...")
+    for num_threads in range(32, 33):
+        checkpointer = DCP.FileSystemCheckpointer(
+            f"{args.work_dir}/{uuid.uuid4()}",
+            thread_count=num_threads
+        )
+
+        begin_ts = time.monotonic()
+        checkpointer.save(state_dict={"model": model})
+        end_ts = time.monotonic()
+        rank_0_print(f"{num_threads}, {time.monotonic() - begin_ts}")
+
+        dist.barrier()
+        if dist.get_rank() == 0:
+            import shutil
+            # Delete a directory and all its contents
+            shutil.rmtree(args.work_dir)
+            shutil.os.makedirs(args.work_dir)
+
+        dist.barrier()

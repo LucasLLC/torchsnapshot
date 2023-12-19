@@ -22,6 +22,8 @@ from torchsnapshot import Snapshot
 class BenchmarkType(Enum):
     TORCHSNAPSHOT = "torchsnapshot"
     TORCH_SAVE = "torch_save"
+    DCP = "dcp"
+
 
     def __str__(self):
         return self.value
@@ -78,7 +80,7 @@ def benchmark_torchsnapshot(
     rank_0_print("Saving a checkpoint with torchsnapshot...")
     app_state = {"model": model}
     begin_ts = time.monotonic()
-    with FSDP.state_dict_type(model, StateDictType.LOCAL_STATE_DICT):
+    with FSDP.state_dict_type(model, StateDictType.SHARDED_STATE_DICT):
         Snapshot.take(
             path=save_dir,
             app_state=app_state,
@@ -112,7 +114,7 @@ def benchmark_torchsave(model: nn.Module, save_dir: str, benchmark_load: bool) -
     begin_ts = time.monotonic()
     with FSDP.state_dict_type(
         model,
-        StateDictType.LOCAL_STATE_DICT,
+        StateDictType.SHARDED_STATE_DICT,
     ):
         state_dict = model.state_dict()
         torch.save(state_dict, save_file)
@@ -122,6 +124,48 @@ def benchmark_torchsave(model: nn.Module, save_dir: str, benchmark_load: bool) -
         f"Completed saving with torch.save (path: {save_dir}).\n"
         f"Took {end_ts - begin_ts:.2f} seconds."
     )
+
+    if benchmark_load:
+        begin_ts = time.monotonic()
+        with FSDP.state_dict_type(model, StateDictType.LOCAL_STATE_DICT):
+            model.load_state_dict(torch.load(save_file))
+        dist.barrier()
+        end_ts = time.monotonic()
+        rank_0_print(
+            f"Completed loading with torch.save.\n"
+            f"Took {end_ts - begin_ts:.2f} seconds."
+        )
+
+import torch.distributed.checkpoint as DCP
+from torch.distributed.checkpoint.state_dict import (
+    _patch_model_state_dict,
+)
+import shutil
+
+def benchmark_dcp(model: nn.Module, save_dir: str, benchmark_load: bool) -> None:
+    rank_0_print("Saving a checkpoint with DCP.save...")
+
+    os.makedirs(save_dir, exist_ok=True)
+    save_file = f"{save_dir}/state_dict-{dist.get_rank()}.pt"
+    _patch_model_state_dict(model)
+
+    for num_threads in range(1, 17):
+        checkpointer = DCP.FileSystemCheckpointer(save_file, thread_count=num_threads)
+
+        begin_ts = time.monotonic()
+        checkpointer.save(state_dict={"model": model})
+        end_ts = time.monotonic()
+        rank_0_print(end_ts - begin_ts)
+        dist.barrier()
+
+        if dist.get_rank() == 0:
+            import shutil
+            # Delete a directory and all its contents
+            shutil.rmtree(args.work_dir)
+            os.makedirs(args.work_dir)
+
+        dist.barrier()
+    print()
 
     if benchmark_load:
         begin_ts = time.monotonic()
@@ -155,6 +199,8 @@ def main(benchmark_type: BenchmarkType, work_dir: str, benchmark_load: bool) -> 
         benchmark_torchsnapshot(model, save_dir, benchmark_load)
     elif benchmark_type == BenchmarkType.TORCH_SAVE:
         benchmark_torchsave(model, save_dir, benchmark_load)
+    elif benchmark_type == BenchmarkType.DCP:
+        benchmark_dcp(model, save_dir, benchmark_load)
     else:
         raise ValueError(f"Unrecognized benchmark type: {benchmark_type}")
 
@@ -165,9 +211,9 @@ if __name__ == "__main__":
         "--benchmark-type",
         type=BenchmarkType,
         choices=list(BenchmarkType),
-        default=BenchmarkType.TORCHSNAPSHOT,
+        default=BenchmarkType.DCP,
     )
-    parser.add_argument("--work-dir", default="/tmp")
+    parser.add_argument("--work-dir", default="~/tmp")
     parser.add_argument("--benchmark-load", action="store_true", default=False)
 
     args: argparse.Namespace = parser.parse_args()

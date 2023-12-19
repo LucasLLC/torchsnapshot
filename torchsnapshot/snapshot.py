@@ -248,6 +248,7 @@ class Snapshot:
             ``.done()`` method for querying the progress and a ``.wait()``
             method for waiting for the snapshot's completion.
         """
+        print("USING ASYNC")
         torch._C._log_api_usage_once("torchsnapshot.Snapshot.async_take")
         cls._validate_app_state(app_state)
 
