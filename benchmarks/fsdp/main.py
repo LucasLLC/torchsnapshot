@@ -140,26 +140,32 @@ import torch.distributed.checkpoint as DCP
 from torch.distributed.checkpoint.state_dict import (
     _patch_model_state_dict,
 )
+import shutil
 
 def benchmark_dcp(model: nn.Module, save_dir: str, benchmark_load: bool) -> None:
     rank_0_print("Saving a checkpoint with DCP.save...")
 
     os.makedirs(save_dir, exist_ok=True)
     save_file = f"{save_dir}/state_dict-{dist.get_rank()}.pt"
-
     _patch_model_state_dict(model)
 
-    checkpointer = DCP.FileSystemCheckpointer(save_file)
+    for num_threads in range(1, 17):
+        checkpointer = DCP.FileSystemCheckpointer(save_file, thread_count=num_threads)
 
-    begin_ts = time.monotonic()
-    checkpointer.save(state_dict={"model": model})
+        begin_ts = time.monotonic()
+        checkpointer.save(state_dict={"model": model})
+        end_ts = time.monotonic()
+        rank_0_print(end_ts - begin_ts)
+        dist.barrier()
 
-    dist.barrier()
-    end_ts = time.monotonic()
-    rank_0_print(
-        f"Completed saving with torch.save (path: {save_dir}).\n"
-        f"Took {end_ts - begin_ts:.2f} seconds."
-    )
+        if dist.get_rank() == 0:
+            import shutil
+            # Delete a directory and all its contents
+            shutil.rmtree(args.work_dir)
+            os.makedirs(args.work_dir)
+
+        dist.barrier()
+    print()
 
     if benchmark_load:
         begin_ts = time.monotonic()
@@ -205,9 +211,9 @@ if __name__ == "__main__":
         "--benchmark-type",
         type=BenchmarkType,
         choices=list(BenchmarkType),
-        default=BenchmarkType.TORCH_SAVE,
+        default=BenchmarkType.DCP,
     )
-    parser.add_argument("--work-dir", default="/tmp")
+    parser.add_argument("--work-dir", default="~/tmp")
     parser.add_argument("--benchmark-load", action="store_true", default=False)
 
     args: argparse.Namespace = parser.parse_args()
